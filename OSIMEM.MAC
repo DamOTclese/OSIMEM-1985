@@ -1,0 +1,624 @@
+        .z80
+
+; *******************************************************************
+; * This program is for the Ohio Scientific Computers running CP/M  *
+; * Version 1.4. If you are running CP/M under version 2.X, please  *
+; * make certain that the addresses used here are compatable.       *
+; *                                                                 *
+; * NOTE that EMEM might need to be changed.                        *
+; *                                                                 *
+; * This program was written by Fredric L. Rice for in-house use at *
+; * PCCI and the California Security Investigations Department and  *
+; * was released into the Public Domain July 1985. If you have any  *
+; * questions, contact Fredric Rice.                                *
+; *                                                                 *
+; * REQUIREMENTS:                                                   *
+; *    Your OSI must have good memory from these addresses:         *
+; *    0000 - 0400 (hex)                                            *
+; *    A000 - EFFF (hex)                                            *
+; *                                                                 *
+; *    The TPA will reside normally from 0100 to A000 (hex). In     *
+; *    this program, we override the Console Command Processor      *
+; *    (CCP) as we dont need it.                                    *
+; *                                                                 *
+; *    The operator must reset the computer to exit from this       *
+; *    program. If an error is located, the location of this chip   *
+; *    to replace gets displayed, and execution is halted. To have  *
+; *    the computer restart, you must also reset the computer and   *
+; *    start at the beginning.                                      *
+; *                                                                 *
+; *******************************************************************
+
+warm    equ     00h             ;warm boot address entry point
+output  equ     02h             ;bdos output routine
+bdos    equ     05h             ;bdos entry point
+unadio  equ     06h             ;bdos unadorned console i/o
+print   equ     09h             ;bdos print routine
+off     equ     00h             ;offset value for all lables
+
+EMEM    equ     0B000h          ;OSI'S END OF CP/M 1.4 MEMORY
+
+        jp      start           ;go to the of execution entry point
+
+; ***********************************************************************
+; * Allocate message area and stack area.                               *
+; *                                                                     *
+; ***********************************************************************
+
+        ds      20              ;allocate a stack (10 levels deep)
+stack   equ     $ - off
+
+; ***********************************************************************
+; * Note: Escape * is the screen clearing characters required by the    *
+; * Soroc IQ 120 terminal.                                              *
+; *                                                                     *
+; ***********************************************************************
+
+msg01   equ     $ - off                 ;allocate a message buffer
+        db      27, '*', 00h, 00h       ;clear the soroc IQ 120 terminal screen
+        db      'OSI Memory, Ver. 2.2'  ;Display the program name and version
+        db      13, 10                  ;Do a carriage return and line feed
+        db      'Remaining Memory: $'   ;display this message also and endit
+
+msg02   equ     $ - off                 ;allocate a message buffer
+        db      'Pass: $'               ;message before the pass count display
+
+msg03   equ     $ - off                 ;allocate a message buffer
+        db      07h                     ;have the terminal beep an error
+        db      'Long fail at: $'       ;if a memory error was found
+
+msg05   equ     $ - off                 ;allocate a message buffer
+        db      ', bits $'              ;display this message when bits given
+
+msg06   equ     $ - off                 ;allocate a message buffer
+        db      ', chip(s): $'          ;give the chips message
+
+msg07   equ     $ - off                 ;allocate a message buffer
+        db      ', Board $'             ;display board number where error is
+
+msg08   equ     $ - off                 ;allocate a message buffer
+        db      ', Row $'               ;display boards row where error is
+
+msg09   equ     $ - off                 ;allocate a message buffer
+        db      07h                     ;have the terminal beep an error
+        db      'Short fail at: $'      ;if a memory error was found
+
+crlf    equ     $ - off                 ;alocate a message buffer
+        db      13, 10, '$'             ;do a carriage return and line feed
+
+INDEX   equ     $ - off                 ;set up entry point for binary to hex
+        DB      '0123456789ABCDEF'      ;allocate possible hex characters
+
+RESULT  equ     $ - off                 ;place to store the result of the
+        DB      '  $'                   ;binary to hex conversion (printable).
+
+counter equ     $ - off                 ;place to store pass counter
+        db      00h, 00h                ;zero the counter, make it 16 bits
+
+badadd  equ     $ - off                 ;place to store the address of the bad
+        db      00h, 00h                ;memory. zero that, make it 16 bits.
+
+but     equ     $ - off                 ;place to store the byte under test
+        db      00h                     ;it is only 8 bits long. 1 byte
+
+; ***********************************************************************
+; * This routine will fill memory with the value passed to it in REG A, *
+; * and then go back and read all memory to see if there is an address  *
+; * that is unable to store data for a length of time, (a second or two)*
+; *                                                                     *
+; ***********************************************************************
+
+test1   equ     $ - off         ;start of routine
+        push    hl              ;store hl
+        ld      hl,but          ;load hl with address of the byte under test
+        ld      (hl),a          ;and put the byte under test into it
+        pop     hl              ;restore hl
+        push    af              ;store the test pattern into stack from reg a
+        call    size            ;get the remaining memory into hl
+        push    hl              ;store the result
+        pop     bc              ;and put it into  byte count
+        ld      hl,eprog        ;point to end of this program
+        ld      de,eprog + 1    ;point to end of this program plus 1
+        ld      (hl),a          ;load test bit pattern into memory location HL
+        ldir                    ;hl=hl+1, de=de+1, bc=bc-1, pc=pc-3, (hl) = a
+
+; ***********************************************************************
+; * Memory has been filled. Now go back and test it.                    *
+; *                                                                     *
+; ***********************************************************************
+
+        call    size            ;get the remaining memory into hl
+        push    hl              ;store the result
+        pop     bc              ;put result into byte counter
+        ld      hl,eprog        ;point to end of this program
+        pop     af              ;get test pattern off of stack into accumulator
+
+tloop1  equ     $ - off         ;here is the loop for test 1
+        cp      (hl)            ;check memory with accumulator
+        jr      nz,badlong      ;if not good, bad long term memory address
+        inc     hl              ;increment address to test
+        dec     bc              ;decrement byte counter
+        push    af              ;store test pattern
+        ld      a,b             ;load a with byte counter
+        or      c               ;or in lsb of byte counter
+        jr      nz,tloop2       ;continue to test memory
+        pop     af              ;restore test pattern
+        jp      test2           ;now do a fast fill / read memory test
+
+tloop2  equ     $ - off
+        pop     af              ;restore test pattern
+        jr      tloop1          ;continue to loop at point 1
+
+; ***********************************************************************
+; * Here we will fill memory 1 byte at a time and read it back to see   *
+; * if we have a memory gate that is slow enough to cause a fast fill   *
+; * memory problem.                                                     *
+; *                                                                     *
+; ***********************************************************************
+
+test2   equ     $ - off         ;start of this routine
+        ld      hl,but          ;load hl with byte to test address
+        ld      a,(hl)          ;load accumulator with that byte
+        call    size            ;get remaining size into hl
+        push    hl              ;store it as hl
+        pop     bc              ;restore it as bc
+        ld      hl,eprog        ;point to end of this programs memory location
+
+t2loop  equ     $ - off         ;set up an entry point
+        ld      (hl),a          ;load memory with the byte in accumulator
+        cp      (hl)            ;test that same memory with accumulator
+        jr      nz,badshort     ;if not the same, go to bad address
+        inc     hl              ;add 1 to the memory address to test
+        dec     bc              ;subtract 1 from the byte counter
+        push    af              ;store af
+        ld      a,b             ;load a with the most significany byte of count
+        or      c               ;or in the least significant byte of counter
+        pop     af              ;restore af
+        jr      nz,t2loop       ;continue to test memory
+        ret                     ;return to sender of call to test1 routine
+
+badshort        equ     $ - off ;entry point if a bad short term memory found
+        push    af              ;store the test pattern when failure happened
+        push    hl              ;store the bad memory location
+        ld      de,msg09        ;point to the message buffer
+        jr      badtie          ;go to bad tie
+
+; ***********************************************************************
+; * If we have found a bad memory location, we enter here and display   *
+; * the address, bits bad, board number, and chips to replace.          *
+; *                                                                     *
+; ***********************************************************************
+
+badlong equ     $ - off         ;entry point into bad long term memory address
+        push    af              ;store the test pattern when failure happened
+        push    hl              ;store the bad memory location
+        ld      de,msg03        ;point to the message buffer
+
+badtie: ld      c,print         ;load c with print request
+        call    bdos            ;and display the failure message
+        pop     hl              ;restore the bad address
+        ld      (badadd),hl     ;and put it into memory for safe keeping
+        call    phl             ;print the bad address onto the screen
+        ld      de,msg05        ;load bits message
+        ld      c,print         ;and display it
+        call    bdos            ;with this call to bdos
+        ld      hl,(badadd)     ;get bad address into hl
+        ld      a,(hl)          ;load a with it
+        ld      e,a             ;put result into e
+        pop     af              ;restore test pattern into accumulator
+        xor     e               ;and see what bits were bad with exclusive or
+        call    givebit         ;and give the bad bits
+        ld      de,msg07        ;point to message number 7
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display the message
+        ld      hl,(badadd)     ;get bad address out of memory
+        call    board           ;and display the board number
+        ld      de,crlf         ;load de with crlf
+        ld      c,print         ;load c with print
+        call    bdos            ;and display the cr lf
+        halt                    ;halt operation until reset
+
+; ***********************************************************************
+; * The address in hl gets checked to see what board and row its on     *
+; *                                                                     *
+; ***********************************************************************
+
+board   equ     $ - off         ;entry point for display of bad board and row
+        ld      a,h             ;load a with msb of address
+        and     0f0h            ;mask out 4 bits from msb of bad address
+        cp      00h             ;is it board 1, row 1?
+        jr      z,b1r1          ;if so, go to it
+        cp      10h             ;is it board 1, row 2?
+        jr      z,b1r2          ;if so, go to it
+        cp      20h             ;is it board 1, row 3?
+        jr      z,b1r3          ;if so, go to it
+        cp      30h             ;is it board 1, row 4?
+        jr      z,b1r4          ;if so, go to it
+        cp      40h             ;is it board 2, row 1?
+        jr      z,b2r1          ;if so, go to it
+        cp      50h             ;is it board 2, row 2?
+        jr      z,b2r2          ;if so, go to it
+        cp      60h             ;is it board 2, row 3?
+        jr      z,b2r3          ;if so, go to it
+        cp      70h             ;is it board 2, row 4?
+        jr      z,b2r4          ;if so, go to it
+        cp      80h             ;is it board 3, row 2?
+        jr      z,b3r1          ;if so, go to it
+        cp      90h             ;is it board 3, row 3?
+        jr      z,b3r2          ;if so, go to it
+        cp      0a0h            ;is it board 3, row 4?
+        jr      z,b3r3          ;if so, go to it
+        cp      0b0h            ;is it board 3, row 4?
+        jr      z,b3r4          ;if so, go to it
+
+; ***********************************************************************
+; * Board 1, row 1 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b1r1    equ     $ - off
+        ld      b,1
+
+; ***********************************************************************
+; * Tie up entry point for board 1.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b1      equ     $ - off
+        ld      a,1
+        jr      tieup
+
+; ***********************************************************************
+; * Board 1, row 2 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b1r2    equ     $ - off
+        ld      b,2
+        jr      b1
+
+; ***********************************************************************
+; * Board 1, row 3 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b1r3    equ     $ - off
+        ld      b,3
+        jr      b1
+
+; ***********************************************************************
+; * Board 1, row 4 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b1r4    equ     $ - off
+        ld      b,4
+        jr      b1
+
+; ***********************************************************************
+; * Board 2, row 1 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b2r1    equ     $ - off
+        ld      b,1
+
+; ***********************************************************************
+; * Tie up entry point for board 2.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b2      equ     $ - off
+        ld      a,2
+        jr      tieup
+
+; ***********************************************************************
+; * Board 2, row 2 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b2r2    equ     $ - off
+        ld      b,2
+        jr      b2
+
+; ***********************************************************************
+; * Board 2, row 3 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b2r3    equ     $ - off
+        ld      b,3
+        jr      b2
+
+; ***********************************************************************
+; * Board 2, row 4 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b2r4    equ     $ - off
+        ld      b,4
+        jr      b2
+
+; ***********************************************************************
+; * Board 3, row 1 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b3r1    equ     $ - off
+        ld      b,1
+
+; ***********************************************************************
+; * Tie up entry point for board 3.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b3      equ     $ - off
+        ld      a,3
+        jr      tieup
+
+; ***********************************************************************
+; * Board 3, row 2 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b3r2    equ     $ - off
+        ld      b,2
+        jr      b3
+
+; ***********************************************************************
+; * Board 3, row 3 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b3r3    equ     $ - off
+        ld      b,3
+        jr      b3
+
+; ***********************************************************************
+; * Board 3, row 4 was contained the bad chip. Equate regb with the row *
+; * and rega with the board number.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+b3r4    equ     $ - off
+        ld      b,4
+        jr      b3
+
+; ***********************************************************************
+; * Display the board number and row number with the values passed in   *
+; * the accumulator and register B.                                     *
+; *                                                                     *
+; ***********************************************************************
+
+tieup   equ     $ - off         ;on reaching here, a = board, b = row
+        push    bc              ;store the row
+        call    cnvrt           ;convert row into hex
+        ld      de,result       ;point to result
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display the board number to check
+        ld      de,msg08        ;point to row string
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display it
+        pop     af              ;restore row into af
+        call    cnvrt           ;and convert it
+        ld      de,result       ;point to result
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display it
+        ret                     ;return to sender
+
+; ***********************************************************************
+; * Here we take the value passed in register a and display the bit     *
+; * numbers that need to be changed.                                    *
+; *                                                                     *
+; ***********************************************************************
+
+givebit equ     $ - off         ;here is its entry point
+        push    af              ;store the bad byte
+        call    cnvrt           ;convert a into hex
+        ld      de,result       ;point to result
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display bad bits
+        ld      de,msg06        ;point to message buffer
+        ld      c,print         ;load c with print request
+	call	bdos		;and display that message
+	pop	af		;restore af
+	ld	e,30h		;load e with ascii '0'
+	bit	0,a		;test bit 0
+	call    nz,givebad      ;display bad bit
+        ld      e,31h           ;load e with '1'
+        bit     1,a             ;test bit 1
+        call    nz,givebad      ;display bad bit
+        ld      e,32h           ;load e with '2' for ascii display
+        bit     2,a             ;test bit 2
+        call    nz,givebad      ;display bad bit
+        ld      e,33h           ;load e with '3'
+        bit     3,a             ;test bit 3
+        call    nz,givebad      ;display bad bit
+        ld      e,34h           ;load e with '4' for ascii display
+        bit     4,a             ;test bit 4
+        call    nz,givebad      ;display bad bit
+        ld      e,35h           ;load e with '5'
+        bit     5,a             ;test bit 5
+        call    nz,givebad      ;display bad bit
+        ld      e,36h           ;load e with '6' for ascii display
+        bit     6,a             ;test bit 6
+        call    nz,givebad      ;display bad bit
+        ld      e,37h           ;load e with '7'
+        bit     7,a             ;test bit 7
+        call    nz,givebad      ;display bad bit
+        ret                     ;return to sender
+
+givebad equ     $ - off         ;here we display the bad bit
+        push    af              ;store af
+        push    de              ;store de
+        ld      c,output        ;load c with output request
+        call    bdos            ;and display the bad bit
+        ld      e,' '           ;load e with a space
+        ld      c,output        ;load c with outpu
+        call    bdos            ;and display the space
+        pop     de              ;restore de
+        pop     af              ;restore af
+        ret                     ;return to sender
+
+; ***********************************************************************
+; * This subroutine coded in z80 converts the 8 bit value in the        *
+; * accumulator into two 8 bit ascii hexidicimal values. The result of  *
+; * the conversion is placed into the string called 'RESULT'. There is  *
+; * a dollar sign at the end this buffer to allow the printing of the   *
+; * converted value with bdos calls.                                    *
+; *                                                                     *
+; ***********************************************************************
+
+CNVRT   equ     $ - off
+        PUSH    HL              ;Store away the working hl register
+        PUSH    BC              ;and the bc register
+        LD      HL,RESULT       ;Point to the buffer that will contain result
+        INC     HL              ;And add 1 to it to point to LSB
+        PUSH    AF              ;Store the accumulator into stack
+        AND     0FH             ;And a with 00001111
+        CALL    CNVGET          ;Call the conversion routine 
+        DEC     HL              ;Decriment the result address
+        POP     AF              ;Restore the byte being converted
+        AND     0F0H            ;And a with 11110000
+        RRCA                    ;Rotate a to the right ONCE
+        RRCA                    ;Rotate a to the right TWICE
+        RRCA                    ;Rotate a to the right AGAIN
+        RRCA                    ;Rotate a to the right the last time
+        CALL    CNVGET          ;Call the conversion routine 
+        POP     BC              ;Restore the systems bc register
+        POP     HL              ;And the hl register
+        RET                     ;Return to sender
+
+CNVGET  equ     $ - off
+        PUSH    HL              ;Store away the conversion hl pair
+        PUSH    DE              ;And de along with it
+        LD      HL,INDEX        ;Place index at address into hl
+        LD      D,0             ;Load d with 0 so that i can add index
+        LD      E,A             ;Load e register with the a register
+        ADC     HL,DE           ;Add with cary to get the displacement byte
+        LD      A,(HL)          ;Place the displaced byte into register
+        POP     DE              ;Restore working de register
+        POP     HL              ;And the hl register pair
+        LD      (HL),A          ;Place second byte into the result buffer
+        RET                     ;Return to sender
+
+; ***********************************************************************
+; * This subroutine will take the 16 bit value in the HL register pair  *
+; * and display the ascii hexidicimal value on the screen.              *
+; *                                                                     *
+; ***********************************************************************
+
+PHL     equ     $ - off
+        PUSH    HL              ;store hl
+        LD      A,H             ;load a with msb
+        CALL    GIVEIT          ;display the result
+        POP     HL              ;restore the working hl
+        LD      A,L             ;load a with the lsb
+        CALL    GIVEIT          ;display the result
+        RET                     ;Return to caller
+
+GIVEIT  equ     $ - off
+        CALL    CNVRT           ;call the conversion routine
+        LD      DE,RESULT       ;load de with the result of the conversion
+        LD      C,PRINT         ;load c with bdos print request
+        CALL    BDOS            ;and display the last hex number
+        RET                     ;return to sender
+
+; ***********************************************************************
+; * Put the remaining memory size into registers HL.                    *
+; *                                                                     *
+; ***********************************************************************
+
+size    equ     $ - off         ;get size of remaining memory
+        push    af              ;push af
+        push    bc              ;push bc
+        push    de              ;push de
+        ld      hl,emem         ;load hl with end of osi's remaining memory
+        ld      de,eprog        ;load de with address of end of this program
+        sbc     hl,de           ;subtract the two
+        pop     de              ;restore de
+        pop     bc              ;restore bc
+        pop     af              ;restore af
+        ret                     ;return with value in reg HL
+
+; ***********************************************************************
+; * Main entry point.                                                   *
+; *                                                                     *
+; ***********************************************************************
+
+start   equ     $ - off         ;start of execution
+        ld      sp,stack        ;relocate the stack pointer to internal memory
+        ld      de,msg01        ;point to message buffer
+        ld      c,print         ;load c with bdos print request
+        call    bdos            ;call routine that prints message
+        call    size            ;get the remaining size of memory
+        call    phl             ;and display it
+        ld      de,crlf         ;point to cr lf
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display the crlf
+
+loop1   equ     $ - off         ;set up an entry point
+        ld      a,(00000000b)   ;load accumulator with test byte of 00000000
+        call    test1           ;and test slow memory fill
+        ld      a,(11111111b)   ;load accumulator with test byte of 11111111
+        call    test1           ;and test slow memory fill
+        ld      a,(10101010b)   ;load accumulator with test byte of 10101010
+        call    test1           ;and test slow memory fill
+        ld      a,(01010101b)   ;load accumulator with test byte of 01010101
+        call    test1           ;and test slow memory fill
+        ld      a,(00000001b)   ;load accumulator with test byte of 00000001
+        call    test1           ;and test slow memory fill
+        ld      a,(00000010b)   ;load accumulator with test byte of 00000010
+        call    test1           ;and test slow memory fill
+        ld      a,(00000100b)   ;load accumulator with test byte of 00000100
+        call    test1           ;and test slow memory fill
+        ld      a,(00001000b)   ;load accumulator with test byte of 00001000
+        call    test1           ;and test slow memory fill
+        ld      a,(00010000b)   ;load accumulator with test byte of 00010000
+        call    test1           ;and test slow memory fill
+        ld      a,(00100000b)   ;load accumulator with test byte of 00100000
+        call    test1           ;and test slow memory fill
+        ld      a,(01000000b)   ;load accumulator with test byte of 01000000
+        call    test1           ;and test slow memory fill
+        ld      a,(10000000b)   ;load accumulator with test byte of 10000000
+        call    test1           ;and test slow memory fill
+
+        ld      c,unadio        ;load c with bdos unadorned console i/o request
+        ld      e,0ffh          ;pass ff in register e to request an input
+        call    bdos            ;and see if a key has been hit
+        cp      0ffh            ;was it a true? did we have a key hit?
+        jp      z,endit         ;if we did get a key, go to endit
+
+        ld      de,msg02        ;point to pass count message
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display message
+        ld      hl,(counter)    ;load hl with counter
+        inc     hl              ;add 1 to it
+        ld      (counter),hl    ;put result back
+        call    phl             ;and display the counter
+        ld      de,crlf         ;point to cr lf
+        ld      c,print         ;load c with print request
+        call    bdos            ;and display the result
+        jr      loop1           ;continue to do it
+
+endit   equ     $ - off         ;here we end the memory test
+        jp      warm            ;terminate with a warm boot
+
+        nop                     ;allocate a byte of buffer space
+        nop                     ;allocate a byte of buffer space
+eprog   equ     $ - off         ;here is the end of the program address equate
+        end     start           ;start execution at start
+
+
+
